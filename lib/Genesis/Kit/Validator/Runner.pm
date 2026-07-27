@@ -360,22 +360,17 @@ sub _execute {
 		step_name => 'genesis check',
 	);
 
-	# A genesis_check matcher means the env asserts that preflight
-	# fails.  _run_genesis_step has already verified the message, so
-	# the env's assertion is complete -- and nothing downstream is
-	# meaningful, because an operator whose check fails never gets to
-	# generate a manifest.  Stop here rather than running `genesis
-	# manifest` and materialising a golden for an environment that
-	# cannot legitimately produce one.
-	if ($env->output_matchers->{genesis_check}) {
-		_step($env, "genesis check failed as expected; skipping remaining pipeline");
+	if (_assertions_done_after_check($env)) {
+		_step($env, "genesis check failed as expected; nothing further to assert");
 		return;
 	}
 
 	# 11. genesis yamls: capture merge order, diff against golden.
 	# Runs as its own subtest so blueprint-order regressions surface
-	# separately from manifest-content regressions.
-	{
+	# separately from manifest-content regressions.  Skipped when the
+	# env expects genesis_check to fail (matcher set) -- a failing
+	# check means yamls generation isn't reachable in real usage.
+	unless ($env->output_matchers->{genesis_check}) {
 		_step($env, Genesis::Kit::Validator::Spec::cprintf(
 			"running #keyword{genesis yamls} (merge-order diff)"));
 		_run_yamls_diff_step(
@@ -663,6 +658,25 @@ sub _copy_ops_fixtures {
 			"$workdir/deployments/ops/$op.yml",
 		) or die "copy of ops/$op failed: $!";
 	}
+}
+
+# _assertions_done_after_check - true when a fired genesis_check
+# matcher is the whole of an env's claim, so the pipeline can stop.
+#
+# An env whose check is expected to fail and which makes no claim
+# about `genesis manifest` has nothing left to assert; running the
+# manifest step anyway materialises a golden for an environment that
+# cannot legitimately produce one.
+#
+# The genesis_manifest guard is load-bearing.  Envs asserting failure
+# at *every* step set both matchers deliberately -- bosh kit's
+# `too-old-to-upgrade` and `openbao-proxy-conflict` are the live
+# examples.  Stopping on genesis_check alone would skip their manifest
+# step, silently retiring an assertion while the suite stayed green.
+sub _assertions_done_after_check {
+	my ($env) = @_;
+	my $matchers = $env->output_matchers // {};
+	return ($matchers->{genesis_check} && !$matchers->{genesis_manifest}) ? 1 : 0;
 }
 
 sub _write_cpi_stub {
