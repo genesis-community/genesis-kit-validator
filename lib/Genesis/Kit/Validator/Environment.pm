@@ -131,9 +131,16 @@ keys to Regexp values.  When set, the corresponding subcommand's
 combined stdout+stderr must match the regex (and non-zero exit is
 tolerated).
 
-Setting C<genesis_check> also ends the pipeline once the check has been
-matched: an environment whose preflight fails never legitimately
+Setting C<genesis_check> B<alone> ends the pipeline once the check has
+been matched: an environment whose preflight fails never legitimately
 reaches manifest generation, so no golden manifest is produced for it.
+
+Setting C<genesis_check> B<and> C<genesis_manifest> together keeps the
+manifest step, so both assertions are evaluated.  This is the shape to
+use for an env that should be rejected at every stage -- bosh kit's
+C<too-old-to-upgrade> and C<openbao-proxy-conflict> are the live
+examples.  Declaring only C<genesis_check> for such an env would
+quietly retire the manifest assertion while the suite stayed green.
 
 =back
 
