@@ -352,25 +352,27 @@ sub _execute {
 
 	# 10. genesis check with output_matchers awareness.
 	_step($env, Genesis::Kit::Validator::Spec::cprintf("running #keyword{genesis check}"));
-	my $check_out = _run_genesis_step(
+	my $check_failed;
+	_run_genesis_step(
 		cmd       => Genesis::Kit::Validator::Runner::Cmd::genesis_check_cmd(
 			env => $env, fixture_dir => $fixture_dir,
 			cpi_stub_path => $cpi_stub_path),
 		matcher   => $env->output_matchers->{genesis_check},
 		step_name => 'genesis check',
+		failed    => \$check_failed,
 	);
 
-	if (_assertions_done_after_check($env)) {
+	if (_assertions_done_after_check($env, $check_failed)) {
 		_step($env, "genesis check failed as expected; nothing further to assert");
 		return;
 	}
 
 	# 11. genesis yamls: capture merge order, diff against golden.
 	# Runs as its own subtest so blueprint-order regressions surface
-	# separately from manifest-content regressions.  Skipped when the
-	# env expects genesis_check to fail (matcher set) -- a failing
-	# check means yamls generation isn't reachable in real usage.
-	unless ($env->output_matchers->{genesis_check}) {
+	# separately from manifest-content regressions.  Skipped when
+	# genesis check failed as its matcher expected -- a failing check
+	# means yamls generation isn't reachable in real usage.
+	unless ($check_failed) {
 		_step($env, Genesis::Kit::Validator::Spec::cprintf(
 			"running #keyword{genesis yamls} (merge-order diff)"));
 		_run_yamls_diff_step(
@@ -391,8 +393,10 @@ sub _execute {
 		capture   => 1,
 	);
 
-	# If the env expected the manifest step to fail on output_matchers,
-	# the manifest_yaml is undef; skip the remainder of the pipeline.
+	# If the manifest step failed as its matcher expected, manifest_yaml
+	# is undef; skip the remainder of the pipeline.  A step that
+	# succeeded while printing the matched text returns its manifest
+	# and is compared against the golden like any other.
 	return unless defined $manifest_yaml;
 
 	# 12. Prune volatile keys; peel off bosh-variables.
@@ -660,13 +664,18 @@ sub _copy_ops_fixtures {
 	}
 }
 
-# _assertions_done_after_check - true when a fired genesis_check
-# matcher is the whole of an env's claim, so the pipeline can stop.
+# _assertions_done_after_check - true when a genesis_check that failed
+# as its matcher expected is the whole of an env's claim, so the
+# pipeline can stop.
 #
-# An env whose check is expected to fail and which makes no claim
-# about `genesis manifest` has nothing left to assert; running the
-# manifest step anyway materialises a golden for an environment that
-# cannot legitimately produce one.
+# An env whose check failed and which makes no claim about `genesis
+# manifest` has nothing left to assert; running the manifest step
+# anyway materialises a golden for an environment that cannot
+# legitimately produce one.
+#
+# A check that passed while printing the matched text is a different
+# case: the env still owes its manifest and golden comparison, so the
+# pipeline carries on.
 #
 # The genesis_manifest guard is load-bearing.  Envs asserting failure
 # at *every* step set both matchers deliberately -- bosh kit's
@@ -674,7 +683,8 @@ sub _copy_ops_fixtures {
 # examples.  Stopping on genesis_check alone would skip their manifest
 # step, silently retiring an assertion while the suite stayed green.
 sub _assertions_done_after_check {
-	my ($env) = @_;
+	my ($env, $check_failed) = @_;
+	return 0 unless $check_failed;
 	my $matchers = $env->output_matchers // {};
 	return ($matchers->{genesis_check} && !$matchers->{genesis_manifest}) ? 1 : 0;
 }
@@ -868,20 +878,25 @@ sub _run_genesis_step {
 		# output_matchers case: env expects the subcommand to fail (or
 		# succeed) with a specific message.  Regex-match the combined
 		# stream; non-zero rc is tolerated when the matcher fires.
-		if ($combined =~ $matcher) {
-			# Pattern matched -- this env's assertion is satisfied at
-			# the CLI-output layer, not at the manifest-diff layer.
-			# Return undef so the caller short-circuits the remainder
-			# of the pipeline (prune/interpolate/diff).
-			return;
-		}
 		die "$step_name: output_matcher did not match.\n".
 		    "Pattern: $matcher\n".
-		    "Output:\n$combined\n";
-	}
+		    "Output:\n$combined\n"
+			unless $combined =~ $matcher;
 
-	# No matcher: expect a clean exit.
-	if ($rc) {
+		# Matched.  What follows depends on whether the step failed.
+		# A failed step has made its assertion at the CLI-output layer
+		# and has nothing to carry forward: report the failure and
+		# return undef so the caller ends the pipeline where it should.
+		# A step that succeeded and printed the expected text (a
+		# warning, say) falls through and is treated exactly like a
+		# step with no matcher, so its manifest is still compared.
+		if ($rc) {
+			${$o{failed}} = 1 if $o{failed};
+			return;
+		}
+	}
+	elsif ($rc) {
+		# No matcher: expect a clean exit.
 		die "$step_name failed (rc=$rc):\n$combined\n";
 	}
 	# Capture returns stdout only -- callers that want the manifest
