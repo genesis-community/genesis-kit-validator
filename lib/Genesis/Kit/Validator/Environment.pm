@@ -104,8 +104,12 @@ Genesis's opportunistic CPI prefetch without a live director lookup.
 
 =item * C<credhub_vars> -- resolves to C<spec/credhub_variables/E<lt>valueE<gt>.yml>.
 
-=item * C<exodus> -- resolves to C<spec/exodus/E<lt>valueE<gt>.yml>; imported
-into vault under C<secret/exodus/E<lt>nameE<gt>>.
+=item * C<exodus> -- resolves to C<spec/exodus/E<lt>valueE<gt>.yml>.  Each
+top-level key is a service type, imported into vault under
+C<secret/exodus/E<lt>nameE<gt>/E<lt>typeE<gt>>.  A top-level key containing
+C</> is instead an absolute vault path and is imported there verbatim,
+for seeding another environment's exodus data or a customized exodus
+mount.
 
 =item * C<cpi> -- string passed as C<GENESIS_TESTING_BOSH_CPI> env var.
 

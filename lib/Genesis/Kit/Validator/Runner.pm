@@ -696,10 +696,11 @@ sub _import_exodus_if_present {
 		.$env->name.")\n"
 		unless -f $stub;
 
-	# The stub is keyed by service type at the top level; each nested
-	# tree becomes flat fields under secret/exodus/<env>/<type>.  Genesis
-	# then reads with unflatten() on the far side, so nested paths
-	# rejoin transparently.
+	# The stub is keyed at the top level by service type, or by an
+	# absolute vault path (see _exodus_vault_path); each nested tree
+	# becomes flat fields under the resulting path.  Genesis then reads
+	# with unflatten() on the far side, so nested paths rejoin
+	# transparently.
 	#
 	# Example:
 	#   old-version.yml:  { bosh: { kit_version: 2.3.0 } }
@@ -714,13 +715,28 @@ sub _import_exodus_if_present {
 		next unless ref($subtree) eq 'HASH';
 		my %flat = _flatten_leaves($subtree);
 		next unless keys %flat;
-		my $path = 'secret/exodus/'.$env->name.'/'.$type;
+		my $path = _exodus_vault_path($env->name, $type);
 		# `safe set` accepts key=value pairs positionally.
 		_run_cmd(
 			['safe', 'set', $path, map { "$_=$flat{$_}" } keys %flat],
 			stderr => '&1',
 		);
 	}
+}
+
+# _exodus_vault_path - vault path for one top-level key of an exodus
+# stub.  A bare key is a service type and lands under this env's own
+# exodus path.  A key containing "/" is an absolute vault path, used
+# verbatim: that is how a stub seeds a different environment's exodus
+# data, or data under a customized exodus mount.  Matches the Go
+# testkit, whose stubs kits carry forward unchanged.
+sub _exodus_vault_path {
+	my ($env_name, $key) = @_;
+	if ($key =~ m{/}) {
+		(my $path = $key) =~ s{^/+}{};
+		return $path;
+	}
+	return "secret/exodus/$env_name/$key";
 }
 
 # _flatten_leaves - depth-first walk a nested hash, joining keys with
