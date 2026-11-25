@@ -26,6 +26,11 @@ sub new {
 	die "Genesis::Kit::Validator::Environment: ops must be an arrayref\n"
 		unless ref $ops eq 'ARRAY';
 
+	# Parsed here, not in the Runner, so a bad selection fails when the
+	# env is declared.
+	require Genesis::Kit::Validator::OCFP;
+	my $ocfp_config = Genesis::Kit::Validator::OCFP->parse_selection($opts{ocfp_config});
+
 	my $matchers = $opts{output_matchers} // {};
 	die "Genesis::Kit::Validator::Environment: output_matchers must be a hashref\n"
 		unless ref $matchers eq 'HASH';
@@ -43,6 +48,7 @@ sub new {
 		cpi_config      => $opts{cpi_config},
 		credhub_vars    => $opts{credhub_vars},
 		exodus          => $opts{exodus},
+		ocfp_config     => $ocfp_config,
 		cpi             => $opts{cpi} // '',
 		ops             => $ops,
 		focus           => $opts{focus} ? 1 : 0,
@@ -64,6 +70,7 @@ sub runtime_config  { $_[0]{runtime_config} }
 sub cpi_config      { $_[0]{cpi_config} }
 sub credhub_vars    { $_[0]{credhub_vars} }
 sub exodus          { $_[0]{exodus} }
+sub ocfp_config     { $_[0]{ocfp_config} }
 sub cpi             { $_[0]{cpi} }
 sub ops             { $_[0]{ops} }
 sub focus           { $_[0]{focus} }
@@ -110,6 +117,13 @@ C<secret/exodus/E<lt>nameE<gt>/E<lt>typeE<gt>>.  A top-level key containing
 C</> is instead an absolute vault path and is imported there verbatim,
 for seeding another environment's exodus data or a customized exodus
 mount.
+
+=item * C<ocfp_config> -- the OCFP bloc config to load into the vault
+before the environment runs: a base and optional add-ins, written as
+C<'base-aws+multi-az'> or C<[qw/base-aws multi-az/]> and merged in that
+order.  Each name resolves to C<spec/ocfp/E<lt>nameE<gt>.yml> in the kit,
+or else to the shared set shipped with the validator.  See
+L<Genesis::Kit::Validator::OCFP>.
 
 =item * C<cpi> -- string passed as C<GENESIS_TESTING_BOSH_CPI> env var.
 
