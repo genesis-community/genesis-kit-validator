@@ -297,6 +297,10 @@ sub _execute {
 	# SANDBOX MODEL section.
 	local %ENV = (%ENV, %{Genesis::Kit::Validator::Runner::Cmd::testing_env(env => $env)});
 
+	# 3b. Empty the shared vault, so this env sees only what it seeds
+	# itself.  See _clear_secrets.
+	_clear_secrets();
+
 	# 4. genesis init in the workdir, linking against the kit under test.
 	# Pass the vault's URL, not its alias: Service::Vault::Remote->find
 	# keys lookup on URL, and passing the alias name produces the opaque
@@ -330,6 +334,11 @@ sub _execute {
 	my $cpi_stub_path = "$workdir/empty-cpi.yml";
 	_write_cpi_stub($cpi_stub_path);
 
+	# 7c. Load the OCFP bloc config the env selected, if any.  Before
+	# the bootstrap below: add-secrets runs the blueprint, and a
+	# blueprint may read the bloc config.
+	_load_ocfp_config($env, $kit_dir);
+
 	# 8. Vault-cache bootstrap (only if spec/vault/<env>.yml absent).
 	# Expected-failure envs (any output_matchers set) never bootstrap:
 	# add-secrets runs the blueprint, and for those envs the bail IS
@@ -352,25 +361,27 @@ sub _execute {
 
 	# 10. genesis check with output_matchers awareness.
 	_step($env, Genesis::Kit::Validator::Spec::cprintf("running #keyword{genesis check}"));
-	my $check_out = _run_genesis_step(
+	my $check_failed;
+	_run_genesis_step(
 		cmd       => Genesis::Kit::Validator::Runner::Cmd::genesis_check_cmd(
 			env => $env, fixture_dir => $fixture_dir,
 			cpi_stub_path => $cpi_stub_path),
 		matcher   => $env->output_matchers->{genesis_check},
 		step_name => 'genesis check',
+		failed    => \$check_failed,
 	);
 
-	if (_assertions_done_after_check($env)) {
+	if (_assertions_done_after_check($env, $check_failed)) {
 		_step($env, "genesis check failed as expected; nothing further to assert");
 		return;
 	}
 
 	# 11. genesis yamls: capture merge order, diff against golden.
 	# Runs as its own subtest so blueprint-order regressions surface
-	# separately from manifest-content regressions.  Skipped when the
-	# env expects genesis_check to fail (matcher set) -- a failing
-	# check means yamls generation isn't reachable in real usage.
-	unless ($env->output_matchers->{genesis_check}) {
+	# separately from manifest-content regressions.  Skipped when
+	# genesis check failed as its matcher expected -- a failing check
+	# means yamls generation isn't reachable in real usage.
+	unless ($check_failed) {
 		_step($env, Genesis::Kit::Validator::Spec::cprintf(
 			"running #keyword{genesis yamls} (merge-order diff)"));
 		_run_yamls_diff_step(
@@ -391,8 +402,10 @@ sub _execute {
 		capture   => 1,
 	);
 
-	# If the env expected the manifest step to fail on output_matchers,
-	# the manifest_yaml is undef; skip the remainder of the pipeline.
+	# If the manifest step failed as its matcher expected, manifest_yaml
+	# is undef; skip the remainder of the pipeline.  A step that
+	# succeeded while printing the matched text returns its manifest
+	# and is compared against the golden like any other.
 	return unless defined $manifest_yaml;
 
 	# 12. Prune volatile keys; peel off bosh-variables.
@@ -660,13 +673,18 @@ sub _copy_ops_fixtures {
 	}
 }
 
-# _assertions_done_after_check - true when a fired genesis_check
-# matcher is the whole of an env's claim, so the pipeline can stop.
+# _assertions_done_after_check - true when a genesis_check that failed
+# as its matcher expected is the whole of an env's claim, so the
+# pipeline can stop.
 #
-# An env whose check is expected to fail and which makes no claim
-# about `genesis manifest` has nothing left to assert; running the
-# manifest step anyway materialises a golden for an environment that
-# cannot legitimately produce one.
+# An env whose check failed and which makes no claim about `genesis
+# manifest` has nothing left to assert; running the manifest step
+# anyway materialises a golden for an environment that cannot
+# legitimately produce one.
+#
+# A check that passed while printing the matched text is a different
+# case: the env still owes its manifest and golden comparison, so the
+# pipeline carries on.
 #
 # The genesis_manifest guard is load-bearing.  Envs asserting failure
 # at *every* step set both matchers deliberately -- bosh kit's
@@ -674,7 +692,8 @@ sub _copy_ops_fixtures {
 # examples.  Stopping on genesis_check alone would skip their manifest
 # step, silently retiring an assertion while the suite stayed green.
 sub _assertions_done_after_check {
-	my ($env) = @_;
+	my ($env, $check_failed) = @_;
+	return 0 unless $check_failed;
 	my $matchers = $env->output_matchers // {};
 	return ($matchers->{genesis_check} && !$matchers->{genesis_manifest}) ? 1 : 0;
 }
@@ -722,6 +741,123 @@ sub _import_exodus_if_present {
 			stderr => '&1',
 		);
 	}
+}
+
+# _load_ocfp_config - put the env's selected OCFP bloc config into the
+# vault.
+#
+# Where an env reads its bloc config depends on its name, on ocfp.bloc
+# and on genesis.ocfp_config_mount.  Genesis owns those rules, so it is
+# asked for the answer rather than the rules being repeated here.  The
+# config is imported for the whole bloc, mgmt and ocf alike, as a real
+# bloc is laid out.
+sub _load_ocfp_config {
+	my ($env, $kit_dir) = @_;
+	my $names = $env->ocfp_config;
+	return unless $names && @$names;
+
+	require Genesis::Kit::Validator::OCFP;
+	require JSON::PP;
+	_step($env, "loading OCFP config: ".join(' + ', @$names));
+	my $merged = Genesis::Kit::Validator::OCFP->load($names, $kit_dir);
+
+	my $base = _ocfp_config_base($env) // '';
+	$base =~ s/\A\s+|\s+\z//g;
+	die "env ".$env->name." selects an ocfp_config but Genesis reports no OCFP ".
+	    "config base for it; is the ocfp feature enabled?\n"
+		unless length $base;
+
+	my $root    = Genesis::Kit::Validator::OCFP->bloc_root($base);
+	my $secrets = Genesis::Kit::Validator::OCFP->vault_secrets($root, $merged);
+	_step($env, sprintf("importing %d OCFP config secret(s) under %s", scalar(keys %$secrets), $root));
+	return unless %$secrets;
+	_run_cmd(
+		['safe', 'import'],
+		stderr => '&1',
+		stdin  => JSON::PP->new->canonical->allow_nonref->encode($secrets),
+	);
+}
+
+# _ocfp_config_base - where Genesis reads this env's bloc config.
+#
+# Asked of Genesis in-process, from the env's own files.  A genesis
+# subcommand would not do: anything that merges a manifest runs the
+# blueprint first, and a blueprint may need the very config this
+# answer is wanted for.  Loading the env object runs no hooks.
+#
+# It is loaded in a forked child, which answers over a pipe.  Loading
+# an env changes process state that the genesis subcommands run later
+# would inherit: with the load done in this process, the doomsday
+# kit's vaults-mgmt env stopped printing a warning its matcher looks
+# for.  The child leaves through _exit so that none of this process's
+# END blocks -- the shared vault's shutdown among them -- run twice.
+sub _ocfp_config_base {
+	my ($env) = @_;
+	require Genesis::Top;
+	require POSIX;
+
+	pipe(my $reader, my $writer)
+		or die "could not open a pipe to ask Genesis about ".$env->name.": $!\n";
+	my $pid = fork();
+	die "could not fork to ask Genesis about ".$env->name.": $!\n" unless defined $pid;
+
+	if (!$pid) {
+		close $reader;
+		my $base = eval {
+			Genesis::Top->new("$CURRENT_WORKDIR/deployments", no_vault => 1)
+				->load_env($env->name)
+				->ocfp_config_base;
+		};
+		print $writer defined($base) ? "ok\n$base" : "error\n".($@ || 'no config base');
+		close $writer;
+		POSIX::_exit(0);
+	}
+
+	close $writer;
+	my $answer = do { local $/; <$reader> } // '';
+	close $reader;
+	waitpid($pid, 0);
+
+	my ($status, $body) = split /\n/, $answer, 2;
+	die "could not find where ".$env->name." reads its OCFP config:\n".
+	    ($body // 'the lookup gave no answer')."\n"
+		unless ($status // '') eq 'ok';
+	return $body;
+}
+
+# _clear_secrets - remove everything a previous env left in the shared
+# vault.
+#
+# Each env writes mostly under its own secret/<env>/<kit> subtree, but
+# an exodus stub can name an absolute path and a kit can read a path
+# that belongs to no env, so leftovers are visible to the next env.
+# The Go testkit started a vault per env; clearing the mount gives the
+# same isolation without paying for a vault start each time.
+#
+# The mount is versioned, so a plain `safe rm` only marks the latest
+# version deleted.  -D -a destroys every version and the metadata, and
+# leaves the path absent rather than tombstoned.
+sub _clear_secrets {
+	my $listing = _run_cmd(['safe', 'paths', 'secret'], stderr => '&1');
+	my @tops = _top_level_secret_paths($listing);
+	return unless @tops;
+	_run_cmd(
+		['safe', 'rm', '-rf', '-D', '-a', @tops],
+		onfailure => "could not clear the shared vault between environments",
+	);
+}
+
+# _top_level_secret_paths - the first-level entries under the secret
+# mount named by `safe paths` output, each once and sorted.  safe's own
+# handshake secret is left in place.
+sub _top_level_secret_paths {
+	my ($listing) = @_;
+	my %tops;
+	for my $path (split /\n/, $listing // '') {
+		next if $path eq 'secret/handshake';
+		$tops{"secret/$1"} = 1 if $path =~ m{^secret/([^/]+)};
+	}
+	return sort keys %tops;
 }
 
 # _exodus_vault_path - vault path for one top-level key of an exodus
@@ -868,20 +1004,25 @@ sub _run_genesis_step {
 		# output_matchers case: env expects the subcommand to fail (or
 		# succeed) with a specific message.  Regex-match the combined
 		# stream; non-zero rc is tolerated when the matcher fires.
-		if ($combined =~ $matcher) {
-			# Pattern matched -- this env's assertion is satisfied at
-			# the CLI-output layer, not at the manifest-diff layer.
-			# Return undef so the caller short-circuits the remainder
-			# of the pipeline (prune/interpolate/diff).
-			return;
-		}
 		die "$step_name: output_matcher did not match.\n".
 		    "Pattern: $matcher\n".
-		    "Output:\n$combined\n";
-	}
+		    "Output:\n$combined\n"
+			unless $combined =~ $matcher;
 
-	# No matcher: expect a clean exit.
-	if ($rc) {
+		# Matched.  What follows depends on whether the step failed.
+		# A failed step has made its assertion at the CLI-output layer
+		# and has nothing to carry forward: report the failure and
+		# return undef so the caller ends the pipeline where it should.
+		# A step that succeeded and printed the expected text (a
+		# warning, say) falls through and is treated exactly like a
+		# step with no matcher, so its manifest is still compared.
+		if ($rc) {
+			${$o{failed}} = 1 if $o{failed};
+			return;
+		}
+	}
+	elsif ($rc) {
+		# No matcher: expect a clean exit.
 		die "$step_name failed (rc=$rc):\n$combined\n";
 	}
 	# Capture returns stdout only -- callers that want the manifest

@@ -26,6 +26,11 @@ sub new {
 	die "Genesis::Kit::Validator::Environment: ops must be an arrayref\n"
 		unless ref $ops eq 'ARRAY';
 
+	# Parsed here, not in the Runner, so a bad selection fails when the
+	# env is declared.
+	require Genesis::Kit::Validator::OCFP;
+	my $ocfp_config = Genesis::Kit::Validator::OCFP->parse_selection($opts{ocfp_config});
+
 	my $matchers = $opts{output_matchers} // {};
 	die "Genesis::Kit::Validator::Environment: output_matchers must be a hashref\n"
 		unless ref $matchers eq 'HASH';
@@ -43,6 +48,7 @@ sub new {
 		cpi_config      => $opts{cpi_config},
 		credhub_vars    => $opts{credhub_vars},
 		exodus          => $opts{exodus},
+		ocfp_config     => $ocfp_config,
 		cpi             => $opts{cpi} // '',
 		ops             => $ops,
 		focus           => $opts{focus} ? 1 : 0,
@@ -64,6 +70,7 @@ sub runtime_config  { $_[0]{runtime_config} }
 sub cpi_config      { $_[0]{cpi_config} }
 sub credhub_vars    { $_[0]{credhub_vars} }
 sub exodus          { $_[0]{exodus} }
+sub ocfp_config     { $_[0]{ocfp_config} }
 sub cpi             { $_[0]{cpi} }
 sub ops             { $_[0]{ops} }
 sub focus           { $_[0]{focus} }
@@ -111,6 +118,13 @@ C</> is instead an absolute vault path and is imported there verbatim,
 for seeding another environment's exodus data or a customized exodus
 mount.
 
+=item * C<ocfp_config> -- the OCFP bloc config to load into the vault
+before the environment runs: a base and optional add-ins, written as
+C<'base-aws+multi-az'> or C<[qw/base-aws multi-az/]> and merged in that
+order.  Each name resolves to C<spec/ocfp/E<lt>nameE<gt>.yml> in the kit,
+or else to the shared set shipped with the validator.  See
+L<Genesis::Kit::Validator::OCFP>.
+
 =item * C<cpi> -- string passed as C<GENESIS_TESTING_BOSH_CPI> env var.
 
 =item * C<ops> -- arrayref of ops-file basenames under C<spec/ops/>.
@@ -132,12 +146,20 @@ flag.
 
 =item * C<output_matchers> -- hashref of C<genesis_{check,add_secrets,manifest}>
 keys to Regexp values.  When set, the corresponding subcommand's
-combined stdout+stderr must match the regex (and non-zero exit is
-tolerated).
+combined stdout+stderr must match the regex, and a non-zero exit is
+tolerated.
+
+A matcher does not by itself end the pipeline; the step's exit status
+does.  A step that B<failed> and matched has made its assertion, and
+the rules below decide where the pipeline stops.  A step that
+B<succeeded> and matched -- a warning printed on the way to a good
+manifest -- carries on exactly as if it had no matcher, so the merge
+order and the golden manifest are still compared.
 
 Setting C<genesis_check> B<alone> ends the pipeline once the check has
-been matched: an environment whose preflight fails never legitimately
-reaches manifest generation, so no golden manifest is produced for it.
+failed and been matched: an environment whose preflight fails never
+legitimately reaches manifest generation, so no golden manifest is
+produced for it.
 
 Setting C<genesis_check> B<and> C<genesis_manifest> together keeps the
 manifest step, so both assertions are evaluated.  This is the shape to
@@ -151,9 +173,17 @@ quietly retire the manifest assertion while the suite stayed green.
 =head1 LIMITATIONS
 
 C<output_matchers> asserts on output, not on exit status -- a matcher
-fires whether the subcommand exited zero or non-zero.  An env whose
-command unexpectedly starts succeeding while still printing matching
-text would continue to pass.  Write matchers specific enough that only
-the failure path can produce them.
+fires whether the subcommand exited zero or non-zero, and there is no
+way to require one or the other.  An env written to prove a rejection
+whose command starts succeeding while still printing matching text is
+not failed for that; it carries on to the manifest step, where it is
+compared against a golden, or bootstraps one if none is committed.
+Write matchers specific enough that only the intended path can produce
+them, and treat a golden appearing for a rejection env as a failure.
+
+C<genesis_add_secrets> is accepted for compatibility with testkit
+suites but never evaluated: add-secrets only runs to bootstrap a
+missing vault cache, and that bootstrap is skipped for any env with
+matchers.
 
 =cut
