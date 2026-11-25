@@ -297,6 +297,10 @@ sub _execute {
 	# SANDBOX MODEL section.
 	local %ENV = (%ENV, %{Genesis::Kit::Validator::Runner::Cmd::testing_env(env => $env)});
 
+	# 3b. Empty the shared vault, so this env sees only what it seeds
+	# itself.  See _clear_secrets.
+	_clear_secrets();
+
 	# 4. genesis init in the workdir, linking against the kit under test.
 	# Pass the vault's URL, not its alias: Service::Vault::Remote->find
 	# keys lookup on URL, and passing the alias name produces the opaque
@@ -732,6 +736,41 @@ sub _import_exodus_if_present {
 			stderr => '&1',
 		);
 	}
+}
+
+# _clear_secrets - remove everything a previous env left in the shared
+# vault.
+#
+# Each env writes mostly under its own secret/<env>/<kit> subtree, but
+# an exodus stub can name an absolute path and a kit can read a path
+# that belongs to no env, so leftovers are visible to the next env.
+# The Go testkit started a vault per env; clearing the mount gives the
+# same isolation without paying for a vault start each time.
+#
+# The mount is versioned, so a plain `safe rm` only marks the latest
+# version deleted.  -D -a destroys every version and the metadata, and
+# leaves the path absent rather than tombstoned.
+sub _clear_secrets {
+	my $listing = _run_cmd(['safe', 'paths', 'secret'], stderr => '&1');
+	my @tops = _top_level_secret_paths($listing);
+	return unless @tops;
+	_run_cmd(
+		['safe', 'rm', '-rf', '-D', '-a', @tops],
+		onfailure => "could not clear the shared vault between environments",
+	);
+}
+
+# _top_level_secret_paths - the first-level entries under the secret
+# mount named by `safe paths` output, each once and sorted.  safe's own
+# handshake secret is left in place.
+sub _top_level_secret_paths {
+	my ($listing) = @_;
+	my %tops;
+	for my $path (split /\n/, $listing // '') {
+		next if $path eq 'secret/handshake';
+		$tops{"secret/$1"} = 1 if $path =~ m{^secret/([^/]+)};
+	}
+	return sort keys %tops;
 }
 
 # _exodus_vault_path - vault path for one top-level key of an exodus

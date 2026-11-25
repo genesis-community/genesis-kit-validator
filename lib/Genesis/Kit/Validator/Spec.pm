@@ -147,9 +147,8 @@ sub shared_vault { $SHARED_VAULT }
 
 
 # _start_shared_vault - one memory-backed vault for the whole spec.t
-# run.  Every env's Runner->_execute writes into its own
-# secret/<env-name>/<kit>/... subtree, so there's no cross-env
-# contention on a shared store.  Avoids per-env vault start/stop cost
+# run.  Envs run one at a time and the Runner empties the mount before
+# each (Runner::_clear_secrets), so no env sees what another seeded.  Avoids per-env vault start/stop cost
 # and the safe(1) target/saferc restore dance between envs.
 sub _start_shared_vault {
 	require Service::Vault::Local;
