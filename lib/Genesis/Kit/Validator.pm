@@ -2,7 +2,7 @@ package Genesis::Kit::Validator;
 use v5.20;
 use warnings;
 
-our $VERSION = '0.4.0';
+our $VERSION = '0.5.0';
 
 use Exporter 'import';
 our @EXPORT_OK = qw/kit_dir test_env/;
