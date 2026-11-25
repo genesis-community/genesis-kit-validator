@@ -1,0 +1,68 @@
+# base-aws: a three-AZ OCFP bloc on AWS, holding what kit hooks look up
+# with ocfp_config_lookup.  Paths are relative to the bloc root, so this
+# one file serves an environment whatever its bloc is called.
+#
+# It is not an export of a real bloc.  It carries only the keys kits
+# read; values a manifest reaches through a (( vault ... )) reference
+# render as placeholders in a spec run and need nothing here.
+#
+# Every kit's entries live here, as they would in a real bloc.  The
+# addresses are the ones the kits' own fixtures used before this file
+# existed, kept so their golden manifests did not change.  Several kits
+# were given the same address in the same subnet; each kit reads only
+# its own key, so that is harmless here, but it is not a layout a real
+# bloc would have.
+#
+# Read by:
+#   net.subnets.<ocfp-N>.az, .reserved-ips.<kit>_ip   doomsday, openbao,
+#                                                     prometheus, shield
+#   fqdns.<service>                                   doomsday (all of
+#                                                     them, mgmt and ocf),
+#                                                     prometheus, shield
+#   shield.admin                                      shield
+
+# --- mgmt ------------------------------------------------------------
+
+mgmt/net/subnets/ocfp-0:
+  az: z1
+mgmt/net/subnets/ocfp-0/reserved-ips:
+  openbao_ip:    10.0.2.197
+  openbao_a:     10.0.2.196
+  openbao_b:     10.0.2.198
+  prometheus_ip: 10.0.2.197
+  shield_ip:     10.0.2.197
+
+mgmt/net/subnets/ocfp-1:
+  az: z2
+mgmt/net/subnets/ocfp-1/reserved-ips:
+  doomsday_ip:   10.0.3.197
+  openbao_ip:    10.0.3.197
+  openbao_a:     10.0.3.196
+  openbao_b:     10.0.3.198
+
+mgmt/net/subnets/ocfp-2:
+  az: z3
+mgmt/net/subnets/ocfp-2/reserved-ips:
+  openbao_ip:    10.0.4.197
+  openbao_a:     10.0.4.196
+  openbao_b:     10.0.4.198
+
+mgmt/fqdns:
+  env_type:      mgmt
+  doomsday:      doomsday.mgmt.resolute.example.com
+  shield:        shield.resolute.example.com
+  prometheus:    prometheus.resolute.test
+  grafana:       grafana.resolute.test
+  alertmanager:  alertmanager.resolute.test
+
+mgmt/shield/admin:
+  username: admin
+  password: not-a-real-password
+
+# --- ocf -------------------------------------------------------------
+
+# doomsday watches the certificates behind every FQDN in the bloc, the
+# ocf side included.
+ocf/fqdns:
+  env_type:      ocf
+  api:           api.ocf.resolute.example.com

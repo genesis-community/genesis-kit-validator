@@ -334,6 +334,11 @@ sub _execute {
 	my $cpi_stub_path = "$workdir/empty-cpi.yml";
 	_write_cpi_stub($cpi_stub_path);
 
+	# 7c. Load the OCFP bloc config the env selected, if any.  Before
+	# the bootstrap below: add-secrets runs the blueprint, and a
+	# blueprint may read the bloc config.
+	_load_ocfp_config($env, $kit_dir);
+
 	# 8. Vault-cache bootstrap (only if spec/vault/<env>.yml absent).
 	# Expected-failure envs (any output_matchers set) never bootstrap:
 	# add-secrets runs the blueprint, and for those envs the bail IS
@@ -736,6 +741,88 @@ sub _import_exodus_if_present {
 			stderr => '&1',
 		);
 	}
+}
+
+# _load_ocfp_config - put the env's selected OCFP bloc config into the
+# vault.
+#
+# Where an env reads its bloc config depends on its name, on ocfp.bloc
+# and on genesis.ocfp_config_mount.  Genesis owns those rules, so it is
+# asked for the answer rather than the rules being repeated here.  The
+# config is imported for the whole bloc, mgmt and ocf alike, as a real
+# bloc is laid out.
+sub _load_ocfp_config {
+	my ($env, $kit_dir) = @_;
+	my $names = $env->ocfp_config;
+	return unless $names && @$names;
+
+	require Genesis::Kit::Validator::OCFP;
+	require JSON::PP;
+	_step($env, "loading OCFP config: ".join(' + ', @$names));
+	my $merged = Genesis::Kit::Validator::OCFP->load($names, $kit_dir);
+
+	my $base = _ocfp_config_base($env) // '';
+	$base =~ s/\A\s+|\s+\z//g;
+	die "env ".$env->name." selects an ocfp_config but Genesis reports no OCFP ".
+	    "config base for it; is the ocfp feature enabled?\n"
+		unless length $base;
+
+	my $root    = Genesis::Kit::Validator::OCFP->bloc_root($base);
+	my $secrets = Genesis::Kit::Validator::OCFP->vault_secrets($root, $merged);
+	_step($env, sprintf("importing %d OCFP config secret(s) under %s", scalar(keys %$secrets), $root));
+	return unless %$secrets;
+	_run_cmd(
+		['safe', 'import'],
+		stderr => '&1',
+		stdin  => JSON::PP->new->canonical->allow_nonref->encode($secrets),
+	);
+}
+
+# _ocfp_config_base - where Genesis reads this env's bloc config.
+#
+# Asked of Genesis in-process, from the env's own files.  A genesis
+# subcommand would not do: anything that merges a manifest runs the
+# blueprint first, and a blueprint may need the very config this
+# answer is wanted for.  Loading the env object runs no hooks.
+#
+# It is loaded in a forked child, which answers over a pipe.  Loading
+# an env changes process state that the genesis subcommands run later
+# would inherit: with the load done in this process, the doomsday
+# kit's vaults-mgmt env stopped printing a warning its matcher looks
+# for.  The child leaves through _exit so that none of this process's
+# END blocks -- the shared vault's shutdown among them -- run twice.
+sub _ocfp_config_base {
+	my ($env) = @_;
+	require Genesis::Top;
+	require POSIX;
+
+	pipe(my $reader, my $writer)
+		or die "could not open a pipe to ask Genesis about ".$env->name.": $!\n";
+	my $pid = fork();
+	die "could not fork to ask Genesis about ".$env->name.": $!\n" unless defined $pid;
+
+	if (!$pid) {
+		close $reader;
+		my $base = eval {
+			Genesis::Top->new("$CURRENT_WORKDIR/deployments", no_vault => 1)
+				->load_env($env->name)
+				->ocfp_config_base;
+		};
+		print $writer defined($base) ? "ok\n$base" : "error\n".($@ || 'no config base');
+		close $writer;
+		POSIX::_exit(0);
+	}
+
+	close $writer;
+	my $answer = do { local $/; <$reader> } // '';
+	close $reader;
+	waitpid($pid, 0);
+
+	my ($status, $body) = split /\n/, $answer, 2;
+	die "could not find where ".$env->name." reads its OCFP config:\n".
+	    ($body // 'the lookup gave no answer')."\n"
+		unless ($status // '') eq 'ok';
+	return $body;
 }
 
 # _clear_secrets - remove everything a previous env left in the shared

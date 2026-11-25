@@ -1,0 +1,4 @@
+# no-fqdns: an add-in that removes the bloc's FQDN records, mgmt and
+# ocf, for an environment that must cope without them.
+mgmt/fqdns: ~
+ocf/fqdns: ~
